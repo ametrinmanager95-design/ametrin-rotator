@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Ametrin: Live Charts Rotator</title>
+  <style>
+    :root{
+      /* КОЛЬОРИ/ШРИФТИ */
+      --bg:#ffffff; --fg:#0b1020; --bar-bg:#ffffff; --bar-fg:#0b1020; --accent:#ef4444;
+
+      /* ГОЛОВНІ НАЛАШТУВАННЯ РОЗМІРУ СТОРІНКИ (керуються з JS через SETTINGS) */
+      --content-max-w: 2400px;         /* макс. ширина центральної картки */
+      --stage-h: ;                     /* 86vh / 900px / calc(100vh - 140px); якщо пусто — авто */
+      --outer-pad: 10px 12px 0;        /* відступи контейнера .wrap */
+      --radius: 14px;                  /* радіус скруглення сцен/карток */
+      --page-scale: 1;                 /* масштаб центральної картки (0.8..1.2) */
+
+      /* Інше */
+      --header-pad: 10px;              /* зменшив падінг шапки, щоб підняти сцену */
+      --fade-ms: 1700ms;
+      --ease: cubic-bezier(0.16,1,0.3,1);
+    }
+
+    html, body {height:100%;}
+    body {
+      margin:0;
+      font-family:system-ui,-apple-system,Segoe UI,Roboto,Ubuntu,"Helvetica Neue",Arial;
+      background:var(--bg); color:var(--fg);
+    }
+
+    .topbar{
+      position:sticky; top:0; z-index:10;
+      display:flex; justify-content:space-between; align-items:flex-start; gap:12px;
+      padding:var(--header-pad) 16px; background:var(--bar-bg); color:var(--bar-fg);
+      border-bottom:1px solid #e5e7eb
+    }
+    .left,.right{
+      display:flex; flex-direction:column; gap:2px;   /* два ряди */
+    }
+
+    .brand{font-weight:800; letter-spacing:.2px; line-height:1.1}
+    .brand .dot{color:var(--accent)}
+
+    .place{font-size:1.2rem; font-weight:800; line-height:1.1}
+    .datetime{font-size:2.4rem; font-weight:900; line-height:1.05; text-align:right}
+    .weather{font-size:1.05rem; opacity:.9; text-align:right}
+
+    .wrap{
+      display:flex; justify-content:center;
+      padding: var(--outer-pad);
+      transform: scale(var(--page-scale));         /* масштаб усієї центральної “сторінки” */
+      transform-origin: top center;
+    }
+    .card{ width:100%; max-width: var(--content-max-w); }
+
+    .stage{
+      position:relative; width:100%;
+      /* якщо --stage-h не задана → авто-розрахунок від висоти вікна мінус шапка */
+      height: var(--stage-h, calc(100vh - (2*var(--header-pad) + 1px + 24px)));
+      border:1px solid #e5e7eb; border-radius: var(--radius);
+      overflow:hidden; background:#fff;
+      contain:layout style paint;           /* ізоляція для плавності */
+    }
+
+    .slide{
+      position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+      opacity:0; background:#fff; will-change:opacity,transform;
+      backface-visibility:hidden; transform:translateZ(0);
+    }
+    .slide iframe,.slide img{width:100%; height:100%; border:0; display:block}
+    .slide img{
+      object-fit:var(--img-fit, contain);
+      object-position:var(--img-pos, center center);
+      padding:var(--img-pad, 0px);
+      max-width:var(--img-max-w, 100%);
+      max-height:var(--img-max-h, 100%);
+      transform:scale(var(--img-scale, 1));
+      background:var(--img-bg, #fff);
+    }
+    iframe::-webkit-scrollbar{display:none}
+
+    .footer{ text-align:center; opacity:.6; font-size:.9rem; padding:8px }
+
+    @media (max-width:640px){
+      .place{font-size:1.05rem}
+      .brand{font-size:1rem}
+      .datetime{font-size:1.2rem}
+      .weather{font-size:.95rem}
+    }
+    @media (prefers-reduced-motion:reduce){ :root{ --fade-ms:0ms } }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="left">
+      <div id="place" class="place"></div>
+      <div class="brand">Ametrin <span class="dot">•</span> Ротація діаграм</div>
+    </div>
+    <div class="right">
+      <div id="datetime" class="datetime"></div>
+      <div id="weather" class="weather"></div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <div class="card">
+      <div id="stage" class="stage"></div>
+      <div class="footer">Україна, м. Київ, 2025р.</div>
+    </div>
+  </main>
+
+<script>
+  // ===== ГОЛОВНІ НАЛАШТУВАННЯ РОЗМІРУ СТОРІНКИ (міняєш тільки тут) =====
+  const SETTINGS = {
+    maxWidth: 1820,          // число (px) або рядок '90%' → підставиться в --content-max-w
+    stageHeight: '88vh',     // '88vh', '900px', 'calc(100vh - 140px)' або '' щоб авто-висота
+    headerPadPx: 8,          // зменшений верхній падінг (ще вище сцена)
+    outerPad: '8px 12px 0',  // трохи менший верхній відступ контейнера
+    radiusPx: 16,            // --radius
+    pageScale: 1             // --page-scale (масштаб центральної картки)
+  };
+
+  // Підстановка значень у CSS-змінні
+  (function applySizeSettings(s){
+    const r = document.documentElement;
+    const toPx = v => (typeof v === 'number' ? v + 'px' : String(v));
+
+    if (s.maxWidth !== undefined) r.style.setProperty('--content-max-w', toPx(s.maxWidth));
+    if (s.stageHeight !== undefined && s.stageHeight !== '')
+      r.style.setProperty('--stage-h', String(s.stageHeight));
+    else
+      r.style.removeProperty('--stage-h'); // авто-розрахунок
+
+    if (s.headerPadPx !== undefined) r.style.setProperty('--header-pad', toPx(s.headerPadPx));
+    if (s.outerPad !== undefined) r.style.setProperty('--outer-pad', String(s.outerPad));
+    if (s.radiusPx !== undefined) r.style.setProperty('--radius', toPx(s.radiusPx));
+    if (s.pageScale !== undefined) r.style.setProperty('--page-scale', String(s.pageScale));
+  })(SETTINGS);
+
+  // ===== НАЛАШТУВАННЯ РОТАЦІЇ/ПОГОДИ =====
+  const REGION = { lat:50.4501, lon:30.5234, label:"Київ" };
+  const DEFAULT_ROTATE_MS = 60_000;
+  const CACHE_BUST_MINUTES = 5;
+  const WEATHER_REFRESH_MIN = 10;
+
+  // ===== ПЛЕЙЛИСТ =====
+  const PLAYLIST = [
+    // Google Sheets (автоочистка хедерів у normalizeSheetsUrl)
+    { type:'chart', url:"https://docs.google.com/spreadsheets/d/e/2PACX-1vT1A9jHUrRE2MRSHGVX2x3HAZ9AU_CSadqAYkgI84wWylFRrR-WQuiLnNT6_tJXi3-bkwO6SZBNV4Rq/pubhtml?gid=1246423862&single=true" },
+    { type:'chart', url:"https://docs.google.com/spreadsheets/d/e/2PACX-1vT1A9jHUrRE2MRSHGVX2x3HAZ9AU_CSadqAYkgI84wWylFRrR-WQuiLnNT6_tJXi3-bkwO6SZBNV4Rq/pubhtml?gid=32794338&single=true" },
+    { type:'chart', url:"https://docs.google.com/spreadsheets/d/e/2PACX-1vT1A9jHUrRE2MRSHGVX2x3HAZ9AU_CSadqAYkgI84wWylFRrR-WQuiLnNT6_tJXi3-bkwO6SZBNV4Rq/pubhtml?gid=2095647029&single=true" },
+    { type:'chart', url:"https://docs.google.com/spreadsheets/d/e/2PACX-1vT1A9jHUrRE2MRSHGVX2x3HAZ9AU_CSadqAYkgI84wWylFRrR-WQuiLnNT6_tJXi3-bkwO6SZBNV4Rq/pubhtml?gid=1406852426&single=true" },
+    { type:'chart', url:"https://docs.google.com/spreadsheets/d/e/2PACX-1vT1A9jHUrRE2MRSHGVX2x3HAZ9AU_CSadqAYkgI84wWylFRrR-WQuiLnNT6_tJXi3-bkwO6SZBNV4Rq/pubhtml?gid=1930798029&single=true" },
+    { type:'chart', url:"https://docs.google.com/spreadsheets/d/e/2PACX-1vT1A9jHUrRE2MRSHGVX2x3HAZ9AU_CSadqAYkgI84wWylFRrR-WQuiLnNT6_tJXi3-bkwO6SZBNV4Rq/pubhtml?gid=993430037&single=true" },
+    { type:'chart', url:"https://docs.google.com/spreadsheets/d/e/2PACX-1vT1A9jHUrRE2MRSHGVX2x3HAZ9AU_CSadqAYkgI84wWylFRrR-WQuiLnNT6_tJXi3-bkwO6SZBNV4Rq/pubhtml?gid=933193236&single=true" },
+
+
+    // Картинка з тонким керуванням розміром
+    { type:'image', url:"https://ametrin.biz/img/Ametrin.jpg",
+      fit:'contain', scale:1.15, maxW:'50%', maxH:'50%', pad:'12px', align:'center center', bg:'#fff' },
+  ];
+
+  // ===== УТИЛІТИ =====
+  function normalizeSheetsUrl(u){
+    try{
+      const url = new URL(u);
+      if (url.href.includes('pubhtml')){
+        url.hash = '';
+        url.searchParams.set('widget','true');
+        url.searchParams.set('headers','false');
+        url.searchParams.set('chrome','false');
+      }
+      return url.toString();
+    }catch{ return u; }
+  }
+  function withCacheBuster(u){
+    if (!CACHE_BUST_MINUTES) return u;
+    try{
+      const url = new URL(u, location.href);
+      const bucket = Math.floor(Date.now() / (CACHE_BUST_MINUTES*60*1000));
+      url.searchParams.set('_cb', String(bucket));
+      return url.toString();
+    }catch{ return u; }
+  }
+
+  function applyImageVars(img, opts = {}){
+    const style = img.style;
+    if (opts.fit)   style.setProperty('--img-fit', opts.fit);
+    if (opts.align) style.setProperty('--img-pos', opts.align);
+    if (opts.pad)   style.setProperty('--img-pad', opts.pad);
+    if (opts.maxW)  style.setProperty('--img-max-w', opts.maxW);
+    if (opts.maxH)  style.setProperty('--img-max-h', opts.maxH);
+    if (opts.scale) style.setProperty('--img-scale', String(opts.scale));
+    if (opts.bg)    style.setProperty('--img-bg', opts.bg);
+  }
+
+  function createSlideNode(item){
+    const slide = document.createElement('div');
+    slide.className = 'slide';
+    if (item.type === 'image'){
+      const img = document.createElement('img');
+      img.alt = '';
+      img.decoding = 'async';
+      img.loading = 'eager';
+      img.src = withCacheBuster(item.url);
+      img.onerror = ()=>{ img.alt = 'Помилка завантаження зображення'; };
+      applyImageVars(img, {
+        fit:item.fit, scale:item.scale, maxW:item.maxW, maxH:item.maxH,
+        pad:item.pad, align:item.align, bg:item.bg
+      });
+      slide.appendChild(img);
+    } else {
+      const iframe = document.createElement('iframe');
+      iframe.referrerPolicy = 'no-referrer';
+      iframe.scrolling = 'no';
+      iframe.allowFullscreen = true;
+      iframe.src = withCacheBuster(normalizeSheetsUrl(item.url));
+      slide.appendChild(iframe);
+    }
+    return slide;
+  }
+
+  function preloadIfImage(item){
+    return new Promise(res=>{
+      if (item.type !== 'image') return res();
+      const i = new Image();
+      i.onload = res; i.onerror = res;
+      i.src = withCacheBuster(item.url);
+    });
+  }
+  function waitIframeLoad(slide){
+    return new Promise(res=>{
+      const iframe = slide.querySelector('iframe');
+      if (!iframe) return res();
+      const done = ()=>res();
+      const t = setTimeout(done, 2500);
+      iframe.addEventListener('load', ()=>{ clearTimeout(t); done(); }, {once:true});
+    });
+  }
+
+  // ===== АНІМАЦІЯ (кросфейд з WAAPI) =====
+  const DURATION = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--fade-ms')) || 900;
+  const EASING   = getComputedStyle(document.documentElement).getPropertyValue('--ease') || 'ease';
+
+  function animateIn(el){
+    const prefersNoMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (prefersNoMotion || !DURATION) { el.style.opacity = 1; return Promise.resolve(); }
+    el.style.opacity = 0;
+    const anim = el.animate(
+      [{opacity:0, transform:'scale(0.985)'},{opacity:1, transform:'scale(1)'}],
+      {duration:DURATION, easing:EASING, fill:'forwards'}
+    );
+    return anim.finished.catch(()=>{});
+  }
+  function animateOut(el){
+    const prefersNoMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (prefersNoMotion || !DURATION) { el.style.opacity = 0; return Promise.resolve(); }
+    const anim = el.animate(
+      [{opacity:1, transform:'scale(1)'},{opacity:0, transform:'scale(1.005)'}],
+      {duration:DURATION, easing:EASING, fill:'forwards'}
+    );
+    return anim.finished.catch(()=>{});
+  }
+
+  // ===== РОТАЦІЯ =====
+  const stage = document.getElementById('stage');
+  let idx = Number(localStorage.getItem('ametrin_idx') || 0);
+  if (!Number.isInteger(idx) || idx < 0 || idx >= PLAYLIST.length) idx = 0;
+
+  let currentSlide = null;
+  let nextTimer = null;
+  let paused = false;
+
+  function scheduleNext(ms){ clearTimeout(nextTimer); if (!paused) nextTimer = setTimeout(()=> show(idx+1), ms); }
+  function pause(){ paused = true; clearTimeout(nextTimer); }
+  function resume(){ if (!paused) return; paused = false; scheduleNext(DEFAULT_ROTATE_MS); }
+
+  async function show(i){
+    if (!PLAYLIST.length) return;
+    idx = (i + PLAYLIST.length) % PLAYLIST.length;
+    localStorage.setItem('ametrin_idx', String(idx));
+    const item = PLAYLIST[idx];
+
+    await preloadIfImage(item);
+    const incoming = createSlideNode(item);
+    stage.appendChild(incoming);
+
+    await waitIframeLoad(incoming);
+
+    // подвійний rAF — гарантуємо, що layout застосований перед анімацією
+    await new Promise(r=>requestAnimationFrame(()=>requestAnimationFrame(r)));
+
+    const outgoing = currentSlide;
+    await Promise.all([
+      animateIn(incoming),
+      outgoing ? animateOut(outgoing) : Promise.resolve()
+    ]);
+
+    if (outgoing && outgoing.parentNode === stage) stage.removeChild(outgoing);
+    currentSlide = incoming;
+    scheduleNext(item.durationMs ?? DEFAULT_ROTATE_MS);
+  }
+
+  // старт
+  show(idx);
+
+  // керування
+  document.addEventListener('visibilitychange', ()=>{ if (document.hidden) pause(); else resume(); });
+  window.addEventListener('keydown', (e)=>{
+    if (e.key === 'ArrowRight'){ pause(); show(idx+1); }
+    if (e.key === 'ArrowLeft'){  pause(); show(idx-1); }
+    if (e.key === ' '){ e.preventDefault(); paused ? resume() : pause(); }
+  });
+
+  // ===== ГОДИННИК =====
+  function updateClock(){
+    const now = new Date();
+    const dd = String(now.getDate()).padStart(2,'0');
+    const mm = String(now.getMonth()+1).padStart(2,'0');
+    const yyyy = now.getFullYear();
+    const hh = String(now.getHours()).padStart(2,'0');
+    const mi = String(now.getMinutes()).padStart(2,'0');
+    const ss = String(now.getSeconds()).padStart(2,'0');
+    document.getElementById('datetime').textContent = `${dd}.${mm}.${yyyy} · ${hh}:${mi}:${ss}`;
+  }
+  updateClock(); setInterval(updateClock, 1000);
+
+  // ===== ПОГОДА =====
+  document.getElementById('place').textContent = REGION.label;
+  async function loadWeather(){
+    try{
+      const url = `https://api.open-meteo.com/v1/forecast?latitude=${REGION.lat}&longitude=${REGION.lon}&current=temperature_2m,apparent_temperature,weather_code,wind_speed_10m&timezone=auto`;
+      const res = await fetch(url, {cache:'no-store'});
+      const data = await res.json();
+      const cur = data.current || {};
+      const map = {0:'Ясно',1:'Переважно ясно',2:'Мінлива хмарність',3:'Хмарно',45:'Туман',48:'Паморозь',51:'Мряка слабка',53:'Мряка',55:'Мряка сильна',61:'Дощ слабкий',63:'Дощ',65:'Дощ сильний',66:'Крижаний дощ слабкий',67:'Крижаний дощ сильний',71:'Сніг слабкий',73:'Сніг',75:'Сніг сильний',77:'Сніжні зерна',80:'Зливи слабкі',81:'Зливи',82:'Зливи сильні',85:'Снігові зливи слабкі',86:'Снігові зливи сильні',95:'Гроза',96:'Гроза з градом',99:'Гроза з сильним градом'};
+      const t = cur.temperature_2m, w = cur.wind_speed_10m, code = Number(cur.weather_code ?? -1);
+      document.getElementById('weather').textContent = (isFinite(t)&&isFinite(w)) ? `🌡️ ${t}°C · 💨 ${w} м/с · ${map[code]||''}` : '—';
+    }catch{ document.getElementById('weather').textContent = 'Помилка погоди'; }
+  }
+  loadWeather(); setInterval(loadWeather, WEATHER_REFRESH_MIN*60*1000);
+</script>
+</body>
+</html>
